@@ -6,7 +6,7 @@ from pylab import *
 
 
 class FluidSolver(object):
-    def __init__(self, flow, viscosity=0.005, force_function=None):
+    def __init__(self, flow, viscosity=0.005, force_function=None, advection_method="warp"):
         """
         Simple fluid solver based on:
         * Applying a time-dependent force to a velocity field (flow)
@@ -25,7 +25,7 @@ class FluidSolver(object):
         self.force_function = force_function
         self.t = 0
 
-        def self_advection(flow):
+        def self_advection_warp(flow):
             """
             Fluid flow is modeled as a velocity field.
 
@@ -63,11 +63,35 @@ class FluidSolver(object):
             source_field = waves_x * unit_x + waves_y * unit_y
             waves_x = waves_x - unit_x * source_field
             waves_y = waves_y - unit_y * source_field
-            u = tf.cast(tf.math.real(tf.signal.ifft2d(waves_x)), "float64")
-            v = tf.cast(tf.math.real(tf.signal.ifft2d(waves_y)), "float64")
+            u = tf.cast(tf.signal.ifft2d(waves_x), "float64")
+            v = tf.cast(tf.signal.ifft2d(waves_y), "float64")
             return tf.expand_dims(tf.stack([u, v], axis=-1), 0)
 
-        self.self_advection = tf.function(self_advection)
+        # TODO: Fix scaling to produce a comparable effect to the warp method
+        def self_advection_gradient(flow):
+            """
+            Self-advection implemented using the gradient method.
+            """
+            u = flow[0,:,:,0]
+            v = flow[0,:,:,1]
+            waves_x = tf.signal.fft2d(tf.cast(u, "complex128"))
+            waves_y = tf.signal.fft2d(tf.cast(v, "complex128"))
+
+            u_dx = tf.cast(tf.signal.ifft2d(waves_x * 1j * omega_x), "float64")
+            u_dy = tf.cast(tf.signal.ifft2d(waves_x * 1j * omega_y), "float64")
+            v_dx = tf.cast(tf.signal.ifft2d(waves_y * 1j * omega_x), "float64")
+            v_dy = tf.cast(tf.signal.ifft2d(waves_y * 1j * omega_y), "float64")
+
+            u_new = u - (u*u_dx + v*u_dy) * 0.1
+            v_new = v - (u*v_dx + v*v_dy) * 0.1
+            return tf.expand_dims(tf.stack([u_new, v_new], axis=-1), 0)
+
+        if advection_method == "warp":
+            self.self_advection = tf.function(self_advection_warp)
+        elif advection_method == "gradient":
+            self.self_advection = tf.function(self_advection_gradient)
+        else:
+            raise ValueError("Valid advection methods are 'warp' and 'gradient'")
         self.viscosity_and_mass_conservation = tf.function(viscosity_and_mass_conservation)
 
     def step(self):
@@ -103,7 +127,7 @@ if __name__ == '__main__':
         force = [cos(direction)*force, sin(direction)*force]
         return np.swapaxes(force, 0, 2)
 
-    solver = FluidSolver(flow, force_function=force_function)
+    solver = FluidSolver(flow, force_function=force_function, advection_method="gradient")
     solver.step()  # Get rid of flow divergence
 
     flow = solver.numpy()
